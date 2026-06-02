@@ -80,6 +80,16 @@ Start-PodeServer {
 
         Import-Module (Join-Path $modulesPath "AVDManagement/AVDManagement.psm1") -Force -ErrorAction Stop
         Write-Host "✓ AVDManagement module loaded"
+
+        # Initialize AVD Management with config
+        if ($config.AVD.SubscriptionId -and $config.AVD.SubscriptionId -ne "your-subscription-id-here") {
+            Initialize-AVDManagement -ConfigPath $configPath
+            Write-Host "✓ AVD Management initialized"
+        }
+        else {
+            Write-Host "⚠ AVD not configured - skipping AVD initialization" -ForegroundColor Yellow
+            Write-Host "   Add SubscriptionId and ResourceGroup to config to enable AVD features" -ForegroundColor Yellow
+        }
     }
     catch {
         Write-Host "⚠ Warning: Could not load modules: $($_.Exception.Message)"
@@ -137,24 +147,59 @@ Start-PodeServer {
 
     # ===== Dashboard Endpoints =====
     Add-PodeRoute -Method Get -Path '/api/dashboard' -ScriptBlock {
-        try {
-            $m365Dashboard = Get-M365Dashboard
-            $intuneDashboard = Get-IntuneDashboard
-            $avdDashboard = Get-AVDDashboard
+        $config = Get-PodeState -Name 'Config'
+        $dashboard = @{
+            timestamp = (Get-Date).ToString('o')
+            m365      = $null
+            intune    = $null
+            avd       = $null
+        }
 
-            Write-PodeJsonResponse -Value @{
-                timestamp = (Get-Date).ToString('o')
-                m365      = $m365Dashboard
-                intune    = $intuneDashboard
-                avd       = $avdDashboard
-            }
+        # Get M365 Dashboard (always enabled)
+        try {
+            $dashboard.m365 = Get-M365Dashboard
         }
         catch {
-            Write-PodeJsonResponse -Value @{
-                error   = $_.Exception.Message
-                details = $_.Exception.ToString()
-            } -StatusCode 500
+            Write-Host "M365 Dashboard error: $($_.Exception.Message)"
+            $dashboard.m365 = @{ error = "Failed to load M365 data" }
         }
+
+        # Get Intune Dashboard (if enabled)
+        if ($config.Features.EnableIntune) {
+            try {
+                $dashboard.intune = Get-IntuneDashboard
+            }
+            catch {
+                Write-Host "Intune Dashboard error: $($_.Exception.Message)"
+                $dashboard.intune = @{ error = "Failed to load Intune data" }
+            }
+        }
+
+        # Get AVD Dashboard (if configured)
+        if ($config.Features.EnableAVD -and $config.AVD.SubscriptionId) {
+            try {
+                $dashboard.avd = Get-AVDDashboard
+            }
+            catch {
+                Write-Host "AVD Dashboard error: $($_.Exception.Message)"
+                $dashboard.avd = @{
+                    error = "AVD not configured or no access"
+                    hostPools = @()
+                    totalHosts = 0
+                    activeSessions = 0
+                }
+            }
+        }
+        else {
+            $dashboard.avd = @{
+                error = "AVD not configured"
+                hostPools = @()
+                totalHosts = 0
+                activeSessions = 0
+            }
+        }
+
+        Write-PodeJsonResponse -Value $dashboard
     }
 
     # ===== M365 User Endpoints =====
