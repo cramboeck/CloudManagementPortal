@@ -15,7 +15,6 @@ RUN apt-get update && apt-get install -y \
 # Copy application files
 COPY src/ /app/src/
 COPY config/ /app/config/
-COPY scripts/ /app/scripts/
 
 # Install PowerShell modules
 RUN pwsh -Command " \
