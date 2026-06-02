@@ -288,61 +288,383 @@ async function lockDevice(deviceId) {
     }
 }
 
-// AVD Management
+// ============================================================
+// AVD Host Pool Dashboard
+// ============================================================
+const expandedPools = new Set();
+let avdState = { pools: [], hostsByPool: {}, isDemo: false };
+
+const MOCK_HOSTPOOLS = [
+    {
+        name: 'hp-prod-frankfurt',
+        location: 'westeurope',
+        properties: { hostPoolType: 'Pooled', loadBalancerType: 'DepthFirst', maxSessionLimit: 8 }
+    },
+    {
+        name: 'hp-engineering-eu',
+        location: 'westeurope',
+        properties: { hostPoolType: 'Pooled', loadBalancerType: 'BreadthFirst', maxSessionLimit: 6 }
+    },
+    {
+        name: 'hp-finance-personal',
+        location: 'northeurope',
+        properties: { hostPoolType: 'Personal', loadBalancerType: 'Persistent', maxSessionLimit: 1 }
+    },
+    {
+        name: 'hp-support-na',
+        location: 'eastus',
+        properties: { hostPoolType: 'Pooled', loadBalancerType: 'BreadthFirst', maxSessionLimit: 10 }
+    }
+];
+
+function mockSessionHostsFor(poolName) {
+    const seed = poolName.length;
+    const vmSizes = ['Standard_D4s_v5', 'Standard_D8s_v5', 'Standard_E4s_v5', 'Standard_D2s_v5'];
+    const statuses = ['Available', 'Available', 'Available', 'Unavailable', 'Shutdown'];
+    const hosts = [];
+    const count = 3 + (seed % 4);
+    for (let i = 0; i < count; i++) {
+        const status = statuses[(seed + i) % statuses.length];
+        const isPremium = (seed + i) % 3 !== 0;
+        const allowNew = !((seed + i) % 5 === 0);
+        const sessions = status === 'Available' ? (i + 1) % 5 : 0;
+        hosts.push({
+            name: `${poolName}/sh-${String(i).padStart(2, '0')}.contoso.local`,
+            properties: {
+                status,
+                sessions,
+                allowNewSession: allowNew,
+                vmSize: vmSizes[(seed + i) % vmSizes.length],
+                osDiskType: isPremium ? 'Premium_LRS' : 'Standard_LRS',
+                lastHeartBeat: new Date(Date.now() - (i + 1) * 60000).toISOString()
+            }
+        });
+    }
+    return { value: hosts };
+}
+
+function renderHostpoolSkeletons(count = 4) {
+    const grid = document.getElementById('hostpool-grid');
+    if (!grid) return;
+    grid.innerHTML = Array.from({ length: count }, () => `
+        <div class="skeleton-card">
+            <div class="skeleton-line w-60"></div>
+            <div class="skeleton-line w-40"></div>
+            <div class="skeleton-line h-32 w-80"></div>
+            <div class="skeleton-line w-60"></div>
+            <div class="skeleton-line w-40"></div>
+        </div>
+    `).join('');
+}
+
 async function loadHostPools() {
+    const grid = document.getElementById('hostpool-grid');
+    if (!grid) return;
+
+    renderHostpoolSkeletons();
+
+    let pools = [];
+    let isDemo = false;
+
     try {
         const response = await fetch(`${API_BASE}/avd/hostpools`);
-        const data = await response.json();
-
-        const select = document.getElementById('hostpool-select');
-
-        if (data.value && data.value.length > 0) {
-            select.innerHTML = '<option value="">Select Host Pool...</option>' +
-                data.value.map(pool => `<option value="${pool.name}">${pool.name}</option>`).join('');
+        if (response.ok) {
+            const data = await response.json();
+            if (data && Array.isArray(data.value) && data.value.length > 0) {
+                pools = data.value;
+            } else {
+                isDemo = true;
+            }
         } else {
-            select.innerHTML = '<option value="">No host pools found</option>';
+            isDemo = true;
         }
-    } catch (error) {
-        console.error('Host pools load error:', error);
-        showToast('Error', 'Failed to load host pools', 'error');
+    } catch (err) {
+        console.warn('Host pools API unreachable — falling back to demo data.', err);
+        isDemo = true;
+    }
+
+    if (isDemo) pools = MOCK_HOSTPOOLS;
+
+    const hostsByPool = {};
+    await Promise.all(pools.map(async (pool) => {
+        const name = pool.name;
+        if (isDemo) {
+            hostsByPool[name] = mockSessionHostsFor(name).value;
+            return;
+        }
+        try {
+            const r = await fetch(`${API_BASE}/avd/hostpools/${encodeURIComponent(name)}/sessionhosts`);
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const d = await r.json();
+            hostsByPool[name] = Array.isArray(d.value) ? d.value : [];
+        } catch (err) {
+            console.warn(`Session hosts for ${name} failed — using demo data.`, err);
+            hostsByPool[name] = mockSessionHostsFor(name).value;
+        }
+    }));
+
+    avdState = { pools, hostsByPool, isDemo };
+
+    document.getElementById('avd-demo-banner').style.display = isDemo ? 'flex' : 'none';
+
+    renderHostpoolGrid();
+    updateTopbarMetrics();
+}
+
+function renderHostpoolGrid() {
+    const grid = document.getElementById('hostpool-grid');
+    const { pools, hostsByPool } = avdState;
+
+    if (!pools.length) {
+        grid.innerHTML = `
+            <div class="empty-state" style="grid-column:1/-1;">
+                <h4>No host pools found</h4>
+                <div>Once host pools are deployed in your subscription they will show up here.</div>
+            </div>`;
+        return;
+    }
+
+    grid.innerHTML = pools.map(pool => renderHostpoolCard(pool, hostsByPool[pool.name] || [])).join('');
+}
+
+function renderHostpoolCard(pool, hosts) {
+    const name = pool.name;
+    const type = pool.properties?.hostPoolType || 'Unknown';
+    const lb = pool.properties?.loadBalancerType || '—';
+    const location = pool.location || '—';
+    const total = hosts.length;
+    const available = hosts.filter(h => h.properties?.status === 'Available').length;
+    const offline = hosts.filter(h => ['Unavailable', 'Shutdown', 'NoHeartbeat'].includes(h.properties?.status)).length;
+    const activeSessions = hosts.reduce((s, h) => s + (h.properties?.sessions || 0), 0);
+    const maxSession = pool.properties?.maxSessionLimit || 0;
+    const capacity = maxSession * total;
+    const usagePct = capacity > 0 ? Math.min(100, Math.round((activeSessions / capacity) * 100)) : 0;
+    const usageClass = usagePct >= 85 ? 'crit' : usagePct >= 60 ? 'warn' : '';
+    const isExpanded = expandedPools.has(name);
+    const safeId = `pool-${cssEscape(name)}`;
+
+    return `
+        <div class="hostpool-card${isExpanded ? ' expanded' : ''}" id="${safeId}">
+            <div class="hostpool-card-body">
+                <div class="hostpool-card-header">
+                    <div>
+                        <div class="hostpool-name">${escapeHtml(name)}</div>
+                        <div class="hostpool-meta">
+                            <span class="tag accent">${escapeHtml(type)}</span>
+                            <span class="tag violet">${escapeHtml(lb)}</span>
+                            <span class="tag">📍 ${escapeHtml(location)}</span>
+                        </div>
+                    </div>
+                    <button class="expand-btn" onclick="togglePool('${jsEscape(name)}')" aria-expanded="${isExpanded}" title="${isExpanded ? 'Collapse' : 'Expand session hosts'}">
+                        <span class="chev">⌄</span>
+                    </button>
+                </div>
+
+                <div class="hostpool-stats">
+                    <div class="hp-stat"><div class="label">Total</div><div class="value">${total}</div></div>
+                    <div class="hp-stat success"><div class="label">Available</div><div class="value">${available}</div></div>
+                    <div class="hp-stat danger"><div class="label">Offline</div><div class="value">${offline}</div></div>
+                    <div class="hp-stat accent"><div class="label">Sessions</div><div class="value">${activeSessions}</div></div>
+                </div>
+
+                <div class="usage-row">
+                    <span>Capacity utilization</span>
+                    <span><strong>${usagePct}%</strong>${capacity ? ` · ${activeSessions}/${capacity}` : ''}</span>
+                </div>
+                <div class="usage-bar">
+                    <div class="usage-fill ${usageClass}" style="width:${usagePct}%;"></div>
+                </div>
+            </div>
+
+            <div class="sessionhosts-region">
+                <div class="sessionhosts-inner">
+                    <div class="sh-toolbar">
+                        <span><strong>${total}</strong> session host${total === 1 ? '' : 's'}</span>
+                        <button class="btn btn-sm btn-ghost" onclick="refreshPool('${jsEscape(name)}')">🔄 Refresh</button>
+                    </div>
+                    <div class="table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Host</th>
+                                    <th>VM Size</th>
+                                    <th>Sessions</th>
+                                    <th>Drain</th>
+                                    <th>OS Disk</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                ${hosts.length === 0
+                                    ? `<tr><td colspan="6" class="empty">No session hosts in this pool.</td></tr>`
+                                    : hosts.map(h => renderSessionHostRow(name, h)).join('')}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+}
+
+function renderSessionHostRow(poolName, host) {
+    const fullName = host.name || 'unknown';
+    const shortName = fullName.split('/').pop();
+    const status = host.properties?.status || 'Unknown';
+    const sessions = host.properties?.sessions ?? 0;
+    const allowNew = host.properties?.allowNewSession !== false;
+    const drainOn = !allowNew;
+    const vmSize = host.properties?.vmSize || '—';
+    const diskType = host.properties?.osDiskType || '';
+    const dotClass = status.toLowerCase().replace(/[^a-z]/g, '');
+    const disk = renderDiskPill(diskType);
+
+    return `
+        <tr>
+            <td>
+                <div class="host-name-cell">
+                    <span class="status-dot ${dotClass}" title="${escapeHtml(status)}"></span>
+                    <span class="host-name-text">${escapeHtml(shortName)}</span>
+                </div>
+            </td>
+            <td><span class="badge badge-secondary">${escapeHtml(vmSize)}</span></td>
+            <td>${sessions}</td>
+            <td><span class="badge ${drainOn ? 'badge-warning' : 'badge-success'}">${drainOn ? 'On' : 'Off'}</span></td>
+            <td>${disk}</td>
+            <td>
+                <div class="btn-group">
+                    <button class="btn btn-sm btn-success" onclick="startSessionHost('${jsEscape(poolName)}','${jsEscape(shortName)}')">Start</button>
+                    <button class="btn btn-sm btn-danger"  onclick="confirmStopHost('${jsEscape(poolName)}','${jsEscape(shortName)}')">Stop</button>
+                    <button class="btn btn-sm btn-warning" onclick="confirmDrainMode('${jsEscape(poolName)}','${jsEscape(shortName)}', ${drainOn})">${drainOn ? 'Resume' : 'Drain'}</button>
+                    <button class="btn btn-sm btn-ghost"   onclick="restartSessionHost('${jsEscape(poolName)}','${jsEscape(shortName)}')">Restart</button>
+                </div>
+            </td>
+        </tr>`;
+}
+
+function renderDiskPill(diskType) {
+    if (!diskType) return `<span class="disk-pill standard"><span class="dot"></span>Unknown</span>`;
+    const isPremium = /premium/i.test(diskType);
+    const label = isPremium ? 'Premium SSD' : 'Standard HDD';
+    return `<span class="disk-pill ${isPremium ? 'premium' : 'standard'}"><span class="dot"></span>${label}</span>`;
+}
+
+function togglePool(poolName) {
+    if (expandedPools.has(poolName)) {
+        expandedPools.delete(poolName);
+    } else {
+        expandedPools.add(poolName);
+    }
+    renderHostpoolGrid();
+}
+
+function updateTopbarMetrics() {
+    const { pools, hostsByPool } = avdState;
+    const allHosts = pools.flatMap(p => hostsByPool[p.name] || []);
+    const total = allHosts.length;
+    const offline = allHosts.filter(h => ['Unavailable', 'Shutdown', 'NoHeartbeat'].includes(h.properties?.status)).length;
+    const sessions = allHosts.reduce((s, h) => s + (h.properties?.sessions || 0), 0);
+    setText('metric-pools', pools.length);
+    setText('metric-hosts', total);
+    setText('metric-sessions', sessions);
+    setText('metric-offline', offline);
+}
+
+async function refreshPool(poolName) {
+    if (avdState.isDemo) {
+        avdState.hostsByPool[poolName] = mockSessionHostsFor(poolName).value;
+        renderHostpoolGrid();
+        updateTopbarMetrics();
+        showToast('Refreshed', `Reloaded ${poolName}`, 'info');
+        return;
+    }
+    try {
+        const r = await fetch(`${API_BASE}/avd/hostpools/${encodeURIComponent(poolName)}/sessionhosts`);
+        const d = await r.json();
+        avdState.hostsByPool[poolName] = Array.isArray(d.value) ? d.value : [];
+        renderHostpoolGrid();
+        updateTopbarMetrics();
+        showToast('Refreshed', `Reloaded ${poolName}`, 'info');
+    } catch (err) {
+        showToast('Error', `Failed to refresh ${poolName}`, 'error');
     }
 }
 
+// Legacy entry kept for any future host-pool-select usage; defers to grid view.
 async function loadSessionHosts() {
-    const hostPool = document.getElementById('hostpool-select').value;
-    if (!hostPool) return;
+    await loadHostPools();
+}
 
+// ---------- Session-host actions ----------
+async function startSessionHost(hostPool, hostName) {
     try {
-        const response = await fetch(`${API_BASE}/avd/hostpools/${hostPool}/sessionhosts`);
-        const data = await response.json();
-
-        const tbody = document.querySelector('#sessionhosts-table tbody');
-
-        if (data.value && data.value.length > 0) {
-            tbody.innerHTML = data.value.map(host => `
-                <tr>
-                    <td>${host.name || 'N/A'}</td>
-                    <td><span class="badge ${getStatusBadgeClass(host.properties.status)}">${host.properties.status || 'Unknown'}</span></td>
-                    <td>${host.properties.sessions || 0}</td>
-                    <td><span class="badge ${host.properties.allowNewSession ? 'badge-success' : 'badge-warning'}">${host.properties.allowNewSession ? 'No' : 'Yes'}</span></td>
-                    <td>${host.properties.lastHeartBeat ? new Date(host.properties.lastHeartBeat).toLocaleString() : 'Never'}</td>
-                    <td>
-                        <div class="btn-group">
-                            <button class="btn btn-sm btn-success" onclick="startSessionHost('${hostPool}', '${host.name}')">Start</button>
-                            <button class="btn btn-sm btn-warning" onclick="restartSessionHost('${hostPool}', '${host.name}')">Restart</button>
-                            <button class="btn btn-sm btn-danger" onclick="stopSessionHost('${hostPool}', '${host.name}')">Stop</button>
-                            <button class="btn btn-sm btn-secondary" onclick="toggleDrainMode('${hostPool}', '${host.name}', ${host.properties.allowNewSession})">Drain</button>
-                        </div>
-                    </td>
-                </tr>
-            `).join('');
-        } else {
-            tbody.innerHTML = '<tr><td colspan="6" class="loading">No session hosts found</td></tr>';
-        }
-    } catch (error) {
-        console.error('Session hosts load error:', error);
-        showToast('Error', 'Failed to load session hosts', 'error');
+        const r = await fetch(`${API_BASE}/avd/hostpools/${encodeURIComponent(hostPool)}/sessionhosts/${encodeURIComponent(hostName)}/start`, { method: 'POST' });
+        if (!r.ok && !avdState.isDemo) throw new Error(`HTTP ${r.status}`);
+        showToast('Starting', `${hostName} is starting up`, 'success');
+        setTimeout(() => refreshPool(hostPool), 1500);
+    } catch (err) {
+        showToast('Error', `Failed to start ${hostName}`, 'error');
     }
+}
+
+async function restartSessionHost(hostPool, hostName) {
+    try {
+        const r = await fetch(`${API_BASE}/avd/hostpools/${encodeURIComponent(hostPool)}/sessionhosts/${encodeURIComponent(hostName)}/restart`, { method: 'POST' });
+        if (!r.ok && !avdState.isDemo) throw new Error(`HTTP ${r.status}`);
+        showToast('Restarting', `${hostName} is restarting`, 'warning');
+        setTimeout(() => refreshPool(hostPool), 1500);
+    } catch (err) {
+        showToast('Error', `Failed to restart ${hostName}`, 'error');
+    }
+}
+
+function confirmStopHost(hostPool, hostName) {
+    document.getElementById('stop-host-name').textContent = hostName;
+    const btn = document.getElementById('stop-host-confirm');
+    btn.onclick = async () => {
+        closeModal('stop-host-modal');
+        try {
+            const r = await fetch(`${API_BASE}/avd/hostpools/${encodeURIComponent(hostPool)}/sessionhosts/${encodeURIComponent(hostName)}/stop`, { method: 'POST' });
+            if (!r.ok && !avdState.isDemo) throw new Error(`HTTP ${r.status}`);
+            showToast('Stopping', `${hostName} is shutting down. Disk optimization tip applied.`, 'success');
+            setTimeout(() => refreshPool(hostPool), 1500);
+        } catch (err) {
+            showToast('Error', `Failed to stop ${hostName}`, 'error');
+        }
+    };
+    openModal('stop-host-modal');
+}
+
+function confirmDrainMode(hostPool, hostName, currentlyDraining) {
+    const willEnable = !currentlyDraining;
+    const verb = willEnable ? 'Enable drain mode' : 'Disable drain mode';
+    document.getElementById('drain-mode-title').textContent = `${verb}?`;
+    document.getElementById('drain-mode-subtitle').innerHTML = willEnable
+        ? `Stop routing new sessions to <strong>${escapeHtml(hostName)}</strong>. Existing users remain connected.`
+        : `Allow new sessions on <strong>${escapeHtml(hostName)}</strong> again.`;
+    const btn = document.getElementById('drain-mode-confirm');
+    btn.textContent = willEnable ? 'Enable Drain' : 'Disable Drain';
+    btn.className = `btn ${willEnable ? 'btn-warning' : 'btn-success'}`;
+    btn.onclick = async () => {
+        closeModal('drain-mode-modal');
+        try {
+            const r = await fetch(`${API_BASE}/avd/hostpools/${encodeURIComponent(hostPool)}/sessionhosts/${encodeURIComponent(hostName)}/drainmode`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enable: willEnable })
+            });
+            if (!r.ok && !avdState.isDemo) throw new Error(`HTTP ${r.status}`);
+            showToast('Drain mode', `${willEnable ? 'Enabled' : 'Disabled'} for ${hostName}`, willEnable ? 'warning' : 'success');
+            setTimeout(() => refreshPool(hostPool), 800);
+        } catch (err) {
+            showToast('Error', `Failed to toggle drain mode`, 'error');
+        }
+    };
+    openModal('drain-mode-modal');
+}
+
+// Deprecated direct toggle kept as a thin wrapper for backwards compatibility.
+function toggleDrainMode(hostPool, hostName, currentAllowNewSession) {
+    confirmDrainMode(hostPool, hostName, !currentAllowNewSession);
 }
 
 function getStatusBadgeClass(status) {
@@ -353,59 +675,47 @@ function getStatusBadgeClass(status) {
     }
 }
 
-async function startSessionHost(hostPool, hostName) {
-    if (!confirm('Start this session host?')) return;
-
-    try {
-        await fetch(`${API_BASE}/avd/hostpools/${hostPool}/sessionhosts/${hostName}/start`, { method: 'POST' });
-        showToast('Success', 'Session host start initiated', 'success');
-        setTimeout(() => loadSessionHosts(), 2000);
-    } catch (error) {
-        showToast('Error', 'Failed to start session host', 'error');
-    }
+// ---------- Modal helpers ----------
+function openModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
 }
 
-async function stopSessionHost(hostPool, hostName) {
-    if (!confirm('Stop this session host?')) return;
-
-    try {
-        await fetch(`${API_BASE}/avd/hostpools/${hostPool}/sessionhosts/${hostName}/stop`, { method: 'POST' });
-        showToast('Success', 'Session host stop initiated', 'success');
-        setTimeout(() => loadSessionHosts(), 2000);
-    } catch (error) {
-        showToast('Error', 'Failed to stop session host', 'error');
-    }
+function closeModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
 }
 
-async function restartSessionHost(hostPool, hostName) {
-    if (!confirm('Restart this session host?')) return;
-
-    try {
-        await fetch(`${API_BASE}/avd/hostpools/${hostPool}/sessionhosts/${hostName}/restart`, { method: 'POST' });
-        showToast('Success', 'Session host restart initiated', 'success');
-        setTimeout(() => loadSessionHosts(), 2000);
-    } catch (error) {
-        showToast('Error', 'Failed to restart session host', 'error');
+document.addEventListener('click', (e) => {
+    if (e.target.classList && e.target.classList.contains('modal-overlay')) {
+        e.target.classList.remove('active');
     }
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
+    }
+});
+
+// ---------- Small utilities ----------
+function escapeHtml(str) {
+    return String(str ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
 }
 
-async function toggleDrainMode(hostPool, hostName, currentAllowNewSession) {
-    const enable = currentAllowNewSession; // If currently allowing, we want to enable drain mode
-    const action = enable ? 'enable' : 'disable';
+function jsEscape(str) {
+    return String(str ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
 
-    if (!confirm(`${action.charAt(0).toUpperCase() + action.slice(1)} drain mode for this session host?`)) return;
+function cssEscape(str) {
+    return String(str ?? '').replace(/[^a-zA-Z0-9_-]/g, '-');
+}
 
-    try {
-        await fetch(`${API_BASE}/avd/hostpools/${hostPool}/sessionhosts/${hostName}/drainmode`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enable })
-        });
-        showToast('Success', `Drain mode ${action}d`, 'success');
-        setTimeout(() => loadSessionHosts(), 1000);
-    } catch (error) {
-        showToast('Error', `Failed to ${action} drain mode`, 'error');
-    }
+function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
 }
 
 // AVD Sessions

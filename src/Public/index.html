@@ -203,30 +203,26 @@
 
                 <!-- AVD Page -->
                 <div id="avd-page" class="page">
-                    <div class="page-section">
-                        <div class="section-header">
-                            <h3>Session Hosts</h3>
-                            <select id="hostpool-select" class="filter-select" onchange="loadSessionHosts()">
-                                <option value="">Select Host Pool...</option>
-                            </select>
+                    <div id="avd-demo-banner" class="demo-banner" style="display:none;">
+                        <span class="icon">🧪</span>
+                        <div><strong>Demo mode</strong> — Showing simulated host pools. Configure Azure credentials to load live data.</div>
+                    </div>
+
+                    <div class="avd-toolbar">
+                        <div>
+                            <h3>Host Pools</h3>
+                            <div class="subtitle">Expand a pool to inspect and control its session hosts.</div>
                         </div>
-                        <div class="table-container">
-                            <table id="sessionhosts-table" class="data-table">
-                                <thead>
-                                    <tr>
-                                        <th>Session Host</th>
-                                        <th>Status</th>
-                                        <th>Sessions</th>
-                                        <th>Drain Mode</th>
-                                        <th>Last Heartbeat</th>
-                                        <th>Actions</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr><td colspan="6" class="loading">Select a host pool to view session hosts</td></tr>
-                                </tbody>
-                            </table>
+                        <div class="topbar-metrics">
+                            <div class="topbar-metric"><span class="dot"></span>Pools <strong id="metric-pools">0</strong></div>
+                            <div class="topbar-metric success"><span class="dot"></span>Hosts <strong id="metric-hosts">0</strong></div>
+                            <div class="topbar-metric warning"><span class="dot"></span>Sessions <strong id="metric-sessions">0</strong></div>
+                            <div class="topbar-metric danger"><span class="dot"></span>Offline <strong id="metric-offline">0</strong></div>
                         </div>
+                    </div>
+
+                    <div id="hostpool-grid" class="hostpool-grid">
+                        <!-- Skeleton placeholders rendered on first load -->
                     </div>
                 </div>
 
@@ -260,6 +256,53 @@
                 </div>
             </div>
         </main>
+    </div>
+
+    <!-- Stop Host Modal -->
+    <div id="stop-host-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="stop-host-title">
+        <div class="modal">
+            <div class="modal-icon">⏻</div>
+            <div class="modal-title" id="stop-host-title">Stop session host?</div>
+            <div class="modal-subtitle">
+                You are about to shut down <strong id="stop-host-name">this session host</strong>.
+                Any active sessions on this host will be terminated.
+            </div>
+            <div class="modal-hint">
+                <span class="hint-icon">💡</span>
+                <div>
+                    <strong>Disk cost optimization</strong>
+                    When the VM is stopped (deallocated), consider switching its OS disk from Premium SSD to Standard HDD
+                    to reduce idle storage costs. The portal can prompt this swap on the next start.
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" onclick="closeModal('stop-host-modal')">Cancel</button>
+                <button id="stop-host-confirm" class="btn btn-danger">Stop Host</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Drain Mode Modal -->
+    <div id="drain-mode-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="drain-mode-title">
+        <div class="modal">
+            <div class="modal-icon warning">🚧</div>
+            <div class="modal-title" id="drain-mode-title">Toggle drain mode?</div>
+            <div class="modal-subtitle" id="drain-mode-subtitle">
+                Drain mode prevents new sessions from being routed to this host while keeping existing sessions intact.
+            </div>
+            <div class="modal-hint">
+                <span class="hint-icon">ℹ️</span>
+                <div>
+                    <strong>What happens next</strong>
+                    Existing connected users keep working. Once they sign out the host stays idle and is safe to update,
+                    restart, or remove from the pool.
+                </div>
+            </div>
+            <div class="modal-actions">
+                <button class="btn btn-ghost" onclick="closeModal('drain-mode-modal')">Cancel</button>
+                <button id="drain-mode-confirm" class="btn btn-warning">Confirm</button>
+            </div>
+        </div>
     </div>
 
     <!-- Toast Notifications -->
