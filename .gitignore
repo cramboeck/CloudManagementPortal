@@ -1,0 +1,41 @@
+# Configuration files with secrets
+config/appsettings.json
+*.env
+local.settings.json
+
+# Logs
+logs/
+*.log
+
+# Cache
+cache/
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PowerShell
+*.ps1xml
+
+# Secrets
+*.pfx
+*.pem
+*.key
+secrets/
+
+# Build artifacts
+bin/
+obj/
+dist/
+
+# Docker
+.dockerignore
