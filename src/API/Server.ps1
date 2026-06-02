@@ -62,6 +62,31 @@ Start-PodeServer {
     Set-PodeState -Name 'GetGraphToken' -Value $script:GetGraphToken
     Set-PodeState -Name 'GetAzureToken' -Value $script:GetAzureToken
 
+    # Import custom modules (works both in Docker and locally)
+    $modulesPath = Join-Path $PSScriptRoot "../Modules"
+    try {
+        Import-Module (Join-Path $modulesPath "Authentication/Authentication.psm1") -Force -ErrorAction Stop
+        Write-Host "✓ Authentication module loaded"
+
+        # Initialize authentication with config path
+        Initialize-Authentication -ConfigPath $configPath
+        Write-Host "✓ Authentication initialized"
+
+        Import-Module (Join-Path $modulesPath "M365Management/M365Management.psm1") -Force -ErrorAction Stop
+        Write-Host "✓ M365Management module loaded"
+
+        Import-Module (Join-Path $modulesPath "M365Management/IntuneManagement.psm1") -Force -ErrorAction Stop
+        Write-Host "✓ IntuneManagement module loaded"
+
+        Import-Module (Join-Path $modulesPath "AVDManagement/AVDManagement.psm1") -Force -ErrorAction Stop
+        Write-Host "✓ AVDManagement module loaded"
+    }
+    catch {
+        Write-Host "⚠ Warning: Could not load modules: $($_.Exception.Message)"
+        Write-Host "   Configuration may be missing or invalid."
+        Write-Host "   Please ensure config/appsettings.json exists with valid Azure AD credentials."
+    }
+
     # Server configuration
     # For Docker: bind to 0.0.0.0 to accept external connections
     # For local: localhost/127.0.0.1 works fine
